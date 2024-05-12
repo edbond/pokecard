@@ -1,0 +1,26 @@
+[package]
+name = "mylib"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "my_lib"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+[dependencies]
+anyhow = "1.0.79"
+futures = "0.3.30"
+log = "0.4.20"
+queues = "1.1.0"
+rayon = "1.8"
+async-trait = "0.1.78"
+lapin = "2.3.1"
+tokio = { version = "1", features = ["full"] }
+bytes = "1.6.0"
+diesel = { version = "2.1.6", features = ["sqlite", "numeric"] }
+dotenvy = "0.15.7"
+tracing = "0.1.40"
+itertools = "0.12.1"
+tracing-subscriber = "0.3.18"
+serde_json = "1.0.116"

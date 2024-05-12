@@ -1,0 +1,11 @@
+FROM rust AS base
+
+COPY src/ Cargo* /
+
+RUN cargo build --release --bin worker
+
+FROM scratch
+
+COPY --from=base target/release/worker .
+
+ENTRYPOINT [ "worker" ]

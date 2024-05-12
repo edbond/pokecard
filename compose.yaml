@@ -1,0 +1,10 @@
+services:
+  message_queue:
+    image: "rabbitmq:3.13"
+    hostname: queue
+
+  worker-1:
+    build: Dockerfile.worker
+
+  worker-2:
+    build: Dockerfile.worker
