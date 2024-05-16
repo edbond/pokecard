@@ -1,1 +1,5 @@
 /target
+lib/target
+output
+.DS_Store
+db.sqlite

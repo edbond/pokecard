@@ -1,11 +1,12 @@
+use crate::{
+    models::{Card, NewCard},
+    schema::cards::dsl::*,
+};
 use anyhow::Result;
 use diesel::prelude::*;
-use diesel::sqlite::SqliteConnection;
+use diesel::{sqlite::SqliteConnection, Connection};
 use dotenvy::dotenv;
 use std::env;
-
-use crate::models::{Card, NewCard};
-use crate::schema::{self};
 
 pub fn establish_connection() -> SqliteConnection {
     dotenv().ok();
@@ -23,9 +24,7 @@ pub fn insert_card(conn: &mut SqliteConnection, card: NewCard) -> Result<()> {
 }
 
 pub fn get_images(conn: &mut SqliteConnection) -> Result<Vec<Card>> {
-    use self::schema::cards::dsl::*;
-
-    let images = cards.limit(5).select(title).load::<Card>(conn)?;
+    let images = Card::all_cards(conn);
 
     Ok(images)
 }
