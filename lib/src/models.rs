@@ -1,5 +1,6 @@
-use crate::schema::cards;
+use crate::schema::cards::{self};
 use diesel::{associations::HasTable, prelude::*, sql_query};
+use std::hash::{Hash, Hasher};
 
 #[derive(Queryable, QueryableByName, Identifiable, Selectable, Debug, PartialEq)]
 #[diesel(table_name = crate::schema::cards)]
@@ -23,10 +24,19 @@ pub struct NewCard<'a> {
     pub image_url: Option<String>,
 }
 
+impl Eq for Card {}
+
+impl Hash for Card {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 impl Card {
     pub fn all_cards(conn: &mut SqliteConnection) -> Vec<Card> {
         cards::table
             .select(Card::as_select())
+            // .filter(cards::title.like("%Biba%"))
             .get_results(conn)
             .unwrap()
 
