@@ -37,6 +37,8 @@ impl Card {
         cards::table
             .select(Card::as_select())
             // .filter(cards::title.like("%Biba%"))
+            .filter(cards::id.ne(1651).and(cards::id.ne(2357)))
+            .filter(cards::title.not_like("%Water Energy%"))
             .get_results(conn)
             .unwrap()
 

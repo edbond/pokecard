@@ -3,10 +3,12 @@ use indicatif::ProgressBar;
 use my_lib::{db, models::Card};
 use opencv::boxed_ref::BoxedRef;
 use opencv::core::{
-    norm, norm2, DMatch, KeyPoint, MatTrait, MatTraitConst, Range, RangeTraitConst, NORM_HAMMING,
+    norm, norm2, DMatch, KeyPoint, MatTrait, MatTraitConst, MatTraitConstManual, MatTraitManual,
+    Point_, Range, RangeTraitConst, Rect, Scalar, VectorToVec, CV_32FC4, NORM_HAMMING,
 };
 use opencv::features2d::{BFMatcher, DescriptorMatcher, DescriptorMatcherTrait};
 use opencv::imgcodecs::{imread, IMREAD_COLOR, IMREAD_GRAYSCALE};
+use opencv::imgproc::COLOR_BGR2BGRA;
 use opencv::videoio::{VideoCaptureTrait, VideoCaptureTraitConst};
 use opencv::{
     core::{Mat, Vector},
@@ -20,9 +22,6 @@ use opencv::{
     videoio,
 };
 use rayon::prelude::*;
-use std::cmp::min;
-use std::collections::HashMap;
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tracing_subscriber::fmt;
 
@@ -67,7 +66,7 @@ fn main() -> Result<()> {
 
     let t1 = Instant::now();
 
-    let card_descriptors: Vec<(Mat, &Card)> = cards
+    let card_descriptors: Vec<(Mat, Vector<KeyPoint>, &Card)> = cards
         .par_iter()
         .fold(
             || Vec::new(),
@@ -99,7 +98,7 @@ fn main() -> Result<()> {
                 orb.detect_and_compute(img, &mask, &mut keypoints, &mut orb_desc, false)
                     .expect("orb detect");
 
-                vec.push((orb_desc, card));
+                vec.push((orb_desc, keypoints, card));
 
                 // Draw keypoints on the image
                 // features2d::draw_keypoints(
@@ -163,31 +162,33 @@ fn main() -> Result<()> {
     let mut i = 0;
 
     frame = imread("Photo on 5-17-24 at 5.14 PM.jpg", IMREAD_GRAYSCALE)?;
+    let mut frame_with_keypoints = frame.clone();
 
     loop {
         cam.read(&mut frame)?;
         if frame.size()?.width <= 0 {
             break;
         }
-        let mut frame_with_keypoints = frame.clone();
+
+        let (frame_with_overlay, crop) = add_overlay(&frame, 5, 2.0 / 3.0)?;
 
         i += 1;
-        if i % 27 == 0 {
+        if i % 2 == 0 {
             i = 0;
 
             let mut keypoints = Vector::default();
             let mut query_desc = Mat::default();
             let mask = Mat::default();
-            orb.detect_and_compute(&frame, &mask, &mut keypoints, &mut query_desc, false)
+            orb.detect_and_compute(&crop, &mask, &mut keypoints, &mut query_desc, false)
                 .expect("orb detect");
 
             // Draw keypoints on the image
             features2d::draw_keypoints(
-                &mut frame.clone(),
+                &mut frame_with_overlay.clone(),
                 &keypoints,
                 &mut frame_with_keypoints,
                 opencv::core::Scalar::new(0.0, 255.0, 0.0, 0.0),
-                features2d::DrawMatchesFlags::DRAW_RICH_KEYPOINTS,
+                features2d::DrawMatchesFlags::DEFAULT,
             )
             .expect("keypoints drawn");
 
@@ -196,10 +197,13 @@ fn main() -> Result<()> {
 
             let mut best_match: Option<&Card> = None;
             let mut best_score = f64::MAX;
+            let mut best_keypoints: Option<Vector<KeyPoint>> = None;
 
             let q_size = query_desc.size()?;
 
-            for (desc, card) in card_descriptors.iter() {
+            let mut matcher = BFMatcher::new(NORM_HAMMING, false)?;
+
+            for (desc, keypoints, card) in card_descriptors.iter() {
                 // println!("size1 {:?}, size2 {:?}", query_desc.size()?, desc.size()?);
 
                 // let min_size = opencv::core::min(&query_desc.size()?, &desc.size()?);
@@ -209,12 +213,14 @@ fn main() -> Result<()> {
                 let mut desc_resized: BoxedRef<Mat> = BoxedRef::from(desc.clone());
                 let mut query_resized: BoxedRef<Mat> = BoxedRef::from(query_desc.clone());
 
-                if d_size > q_size {
-                    let r = Range::new(0, query_desc.rows())?;
-                    desc_resized = desc.row_range(&r)?;
-                } else {
-                    let r = Range::new(0, desc.rows())?;
-                    query_resized = query_desc.row_range(&r)?;
+                if query_desc.size()? != desc.size()? {
+                    if d_size > q_size {
+                        let r = Range::new(0, query_desc.rows())?;
+                        desc_resized = desc.row_range(&r)?;
+                    } else {
+                        let r = Range::new(0, desc.rows())?;
+                        query_resized = query_desc.row_range(&r)?;
+                    }
                 }
 
                 // println!(
@@ -222,6 +228,9 @@ fn main() -> Result<()> {
                 //     query_resized.size()?,
                 //     desc_resized.size()?
                 // );
+                //
+
+                matcher.add(desc)?;
 
                 let score = norm2(
                     &query_resized,
@@ -235,10 +244,34 @@ fn main() -> Result<()> {
                 if score < best_score {
                     best_match = Some(card);
                     best_score = score;
+                    best_keypoints = Some(keypoints.clone());
                 }
 
                 // scores.insert(card, score);
             }
+
+            matcher.train()?;
+
+            let mut matches = Vector::<DMatch>::new();
+            matcher
+                .match_(&query_desc, &mut matches, &Mat::default())
+                .expect("match_ call");
+
+            let mut matches_vec = matches.to_vec();
+
+            matches_vec.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+
+            matches = matches_vec.into();
+
+            println!(
+                "Top 5 matches: {:?}",
+                matches.iter().take(5).collect::<Vector<DMatch>>()
+            );
+
+            let top_match = matches.get(0)?;
+            let (_, _, top_card) = card_descriptors.get(top_match.img_idx as usize).unwrap();
+
+            println!("top card: {} {}", top_card.id, top_card.title);
 
             if let Some(match_card) = best_match {
                 println!(
@@ -246,32 +279,29 @@ fn main() -> Result<()> {
                     best_score, match_card.id, match_card.title
                 );
 
-                // let mut match_img_kps = Vector::<KeyPoint>::new();
-                // let mut match_img_desc = Mat::default();
+                let mut img = &mut imdecode(
+                    &vec_to_opencv_vector(match_card.image.clone().unwrap()),
+                    opencv::imgcodecs::IMREAD_GRAYSCALE,
+                )
+                .unwrap()
+                .clone();
 
-                // orb.detect_and_compute(&frame, &mask, &mut keypoints, &mut query_desc, false);
+                features2d::draw_keypoints(
+                    &mut img.clone(),
+                    &best_keypoints.unwrap(),
+                    &mut img,
+                    opencv::core::Scalar::new(0.0, 255.0, 0.0, 0.0),
+                    features2d::DrawMatchesFlags::DEFAULT,
+                )?;
 
-                // let mut keypoints = Vector::<KeyPoint>::default();
-                // let mut query_desc = Mat::default();
-                // let mask = Mat::default();
-
-                // let match_mat = vec_to_opencv_vector(match_card.image.clone().unwrap());
-
-                // orb.detect_and_compute(&match_mat, &mask, &mut keypoints, &mut query_desc, false)
-                //     .expect("orb detect");
-
-                // let mut matcher = BFMatcher::create(NORM_HAMMING, true)?;
-                // let mut matches = Vector::<Vector<DMatch>>::new();
-                // matcher
-                //     .knn_match(&query_desc, &mut matches, 1, &Mat::default(), false)
-                //     .unwrap();
+                highgui::imshow(window, &img.clone()).expect("display image");
 
                 // let mut match_img_display = Mat::default();
                 // features2d::draw_matches(
                 //     &frame,
-                //     &query_kps,
-                //     &match_img,
-                //     &match_img_kps,
+                //     &keypoints,
+                //     &img,
+                //     &best_keypoints.unwrap(),
                 //     &matches,
                 //     &mut match_img_display,
                 //     Scalar::new(0.0, 0.0, 255.0, 0.0),
@@ -282,7 +312,7 @@ fn main() -> Result<()> {
             }
         }
 
-        let _ = highgui::imshow(window, &frame_with_keypoints).expect("display image");
+        highgui::imshow(window, &frame_with_keypoints).expect("display image");
 
         let key = highgui::wait_key(10)?;
         if key > 0 && key != 255 {
@@ -293,26 +323,44 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// # Load images
-// image1 = cv2.imread('image1.jpg')
-// image2 = cv2.imread('image2.jpg')
+fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, Mat)> {
+    let size = frame.size()?;
+    let mut frame4 = unsafe { Mat::new_size(size, CV_32FC4)? };
 
-// # Initialize feature detector
-// orb = cv2.ORB_create()
+    cvt_color(&frame, &mut frame4, COLOR_BGR2BGRA, 4)?;
 
-// # Find keypoints and descriptors
-// kp1, des1 = orb.detectAndCompute(image1, None)
-// kp2, des2 = orb.detectAndCompute(image2, None)
+    // minus % border top
+    let border_size = (size.height as f32) * border_percentage as f32 / 100.0;
+    let hole_height = (size.height as f32) - 2.0 * border_size;
+    // ratio ~2/3
+    let hole_width = hole_height * ratio;
 
-// # Create matcher
-// bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    let x = ((size.width as f32 / 2.0) - hole_width / 2.0) as i32;
 
-// # Match descriptors
-// matches = bf.match(des1, des2)
+    // println!(
+    //     "rect({}, {}, {}x{})",
+    //     x, border_size, hole_width, hole_height
+    // );
 
-// # Sort matches by score
-// matches = sorted(matches, key=lambda x: x.distance)
+    let hole_rect = Rect::new(x, border_size as i32, hole_width as i32, hole_height as i32);
 
-// # Get image with matches drawn
-// match_img = cv2.drawMatches(image1, kp1, image2, kp2, matches[:50], None)
-// cv2.imshow('Matches', match_img)
+    // overlay.roi_mut(hole_rect)?.set_scalar(white)?;
+
+    let mut dst = Mat::new_size_with_default(size, opencv::core::CV_32FC4, Scalar::all(0.0))?;
+
+    let mut mask = Mat::new_size_with_default(size, opencv::core::CV_32FC4, Scalar::all(0.3))?;
+    opencv::imgproc::rectangle(
+        &mut mask,
+        hole_rect,
+        Scalar::new(1.0, 1.0, 1.0, 0.0),
+        -1,
+        opencv::imgproc::LINE_4,
+        0,
+    )?;
+
+    let crop = Mat::roi(&frame4, hole_rect)?.try_clone()?;
+
+    opencv::core::multiply(&frame4, &mask, &mut dst, 1.0, 8)?;
+
+    Ok((dst, crop))
+}
