@@ -1,5 +1,5 @@
 use anyhow::Result;
-use deadpool::{unmanaged::Pool, unmanaged::PoolConfig};
+pub use deadpool::{unmanaged::Pool, unmanaged::PoolConfig};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder};
 use std::process::{Child, Command};
 use tracing::{info, warn};
@@ -39,6 +39,10 @@ pub async fn create_pool(base_port: i16, max_size: usize) -> Pool<Client> {
     for i in 0..max_size {
         let browser = format!("http://localhost:{}", base_port as usize + i);
         let browser_url = browser.as_str();
+
+        // let cap: Capabilities =
+        //     serde_json::from_str(r#"{"browserName":"chrome","goog:chromeOptions":{"args":[]}}"#)
+        //         .unwrap();
 
         let cap: Capabilities = serde_json::from_str(
             r#"{"browserName":"chrome","goog:chromeOptions":{"args":["--headless"]}}"#,

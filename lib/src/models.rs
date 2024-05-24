@@ -16,11 +16,11 @@ pub struct Card {
 
 #[derive(Insertable)]
 #[diesel(table_name = crate::schema::cards)]
-pub struct NewCard<'a> {
-    pub title: &'a str,
+pub struct NewCard {
+    pub title: String,
     pub image: Option<Vec<u8>>,
     pub price: Option<f64>,
-    pub url: Option<&'a str>,
+    pub url: Option<String>,
     pub image_url: Option<String>,
 }
 

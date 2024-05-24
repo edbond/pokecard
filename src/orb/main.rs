@@ -6,7 +6,7 @@ use opencv::core::{
     norm, norm2, DMatch, KeyPoint, MatTrait, MatTraitConst, MatTraitConstManual, MatTraitManual,
     Point_, Range, RangeTraitConst, Rect, Scalar, VectorToVec, CV_32FC4, NORM_HAMMING,
 };
-use opencv::features2d::{BFMatcher, DescriptorMatcher, DescriptorMatcherTrait};
+use opencv::features2d::{BFMatcher, DescriptorMatcher, DescriptorMatcherTrait, FlannBasedMatcher};
 use opencv::imgcodecs::{imread, IMREAD_COLOR, IMREAD_GRAYSCALE};
 use opencv::imgproc::COLOR_BGR2BGRA;
 use opencv::videoio::{VideoCaptureTrait, VideoCaptureTraitConst};
@@ -71,6 +71,10 @@ fn main() -> Result<()> {
         .fold(
             || Vec::new(),
             |mut vec, card| {
+                if card.image == None {
+                    return vec;
+                }
+
                 let img = &mut imdecode(
                     &vec_to_opencv_vector(card.image.clone().unwrap()),
                     opencv::imgcodecs::IMREAD_GRAYSCALE,
@@ -144,7 +148,6 @@ fn main() -> Result<()> {
         panic!("Unable to open default camera!");
     }
 
-    let mut frame = Mat::default();
     // Create an ORB object
     let mut orb = ORB::create(
         500,
@@ -161,8 +164,19 @@ fn main() -> Result<()> {
 
     let mut i = 0;
 
-    frame = imread("Photo on 5-17-24 at 5.14 PM.jpg", IMREAD_GRAYSCALE)?;
+    let mut frame = imread("Photo on 5-17-24 at 5.14 PM.jpg", IMREAD_GRAYSCALE)?;
     let mut frame_with_keypoints = frame.clone();
+
+    let mut matcher = BFMatcher::create(NORM_HAMMING, false)?;
+    // let mut matcher = FlannBasedMatcher::new_def()?;
+
+    for (desc, _, _) in card_descriptors.iter() {
+        matcher.add(&desc)?;
+    }
+
+    matcher.train()?;
+
+    let ratio = 264.0 / 368.0;
 
     loop {
         cam.read(&mut frame)?;
@@ -170,7 +184,9 @@ fn main() -> Result<()> {
             break;
         }
 
-        let (frame_with_overlay, crop) = add_overlay(&frame, 5, 2.0 / 3.0)?;
+        let t1 = Instant::now();
+        let (frame_with_overlay, crop) = add_overlay(&frame, 5, ratio)?;
+        println!("add overlay took {:?}", t1.elapsed());
 
         i += 1;
         if i % 2 == 0 {
@@ -179,8 +195,13 @@ fn main() -> Result<()> {
             let mut keypoints = Vector::default();
             let mut query_desc = Mat::default();
             let mask = Mat::default();
+
+            let t1 = Instant::now();
+
             orb.detect_and_compute(&crop, &mask, &mut keypoints, &mut query_desc, false)
                 .expect("orb detect");
+
+            println!("orb detect and compute took {:?}", t1.elapsed());
 
             // Draw keypoints on the image
             features2d::draw_keypoints(
@@ -192,66 +213,6 @@ fn main() -> Result<()> {
             )
             .expect("keypoints drawn");
 
-            // # Match descriptors
-            // let mut scores: HashMap<&Card, f64> = HashMap::new();
-
-            let mut best_match: Option<&Card> = None;
-            let mut best_score = f64::MAX;
-            let mut best_keypoints: Option<Vector<KeyPoint>> = None;
-
-            let q_size = query_desc.size()?;
-
-            let mut matcher = BFMatcher::new(NORM_HAMMING, false)?;
-
-            for (desc, keypoints, card) in card_descriptors.iter() {
-                // println!("size1 {:?}, size2 {:?}", query_desc.size()?, desc.size()?);
-
-                // let min_size = opencv::core::min(&query_desc.size()?, &desc.size()?);
-
-                let d_size = desc.size()?;
-
-                let mut desc_resized: BoxedRef<Mat> = BoxedRef::from(desc.clone());
-                let mut query_resized: BoxedRef<Mat> = BoxedRef::from(query_desc.clone());
-
-                if query_desc.size()? != desc.size()? {
-                    if d_size > q_size {
-                        let r = Range::new(0, query_desc.rows())?;
-                        desc_resized = desc.row_range(&r)?;
-                    } else {
-                        let r = Range::new(0, desc.rows())?;
-                        query_resized = query_desc.row_range(&r)?;
-                    }
-                }
-
-                // println!(
-                //     "sizes {:?} {:?}",
-                //     query_resized.size()?,
-                //     desc_resized.size()?
-                // );
-                //
-
-                matcher.add(desc)?;
-
-                let score = norm2(
-                    &query_resized,
-                    &desc_resized,
-                    opencv::core::NORM_HAMMING,
-                    &Mat::default(),
-                )?;
-
-                // println!("score {}, {}", score, card.title);
-
-                if score < best_score {
-                    best_match = Some(card);
-                    best_score = score;
-                    best_keypoints = Some(keypoints.clone());
-                }
-
-                // scores.insert(card, score);
-            }
-
-            matcher.train()?;
-
             let mut matches = Vector::<DMatch>::new();
             matcher
                 .match_(&query_desc, &mut matches, &Mat::default())
@@ -259,7 +220,10 @@ fn main() -> Result<()> {
 
             let mut matches_vec = matches.to_vec();
 
-            matches_vec.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+            matches_vec
+                // .iter()
+                // .filter(|m| m.distance <= 12.0)
+                .sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
 
             matches = matches_vec.into();
 
@@ -273,43 +237,43 @@ fn main() -> Result<()> {
 
             println!("top card: {} {}", top_card.id, top_card.title);
 
-            if let Some(match_card) = best_match {
-                println!(
-                    "best match: ({:?}) {} {}",
-                    best_score, match_card.id, match_card.title
-                );
+            // if let Some(match_card) = best_match {
+            //     println!(
+            //         "best match: ({:?}) {} {}",
+            //         best_score, match_card.id, match_card.title
+            //     );
 
-                let mut img = &mut imdecode(
-                    &vec_to_opencv_vector(match_card.image.clone().unwrap()),
-                    opencv::imgcodecs::IMREAD_GRAYSCALE,
-                )
-                .unwrap()
-                .clone();
+            //     let mut img = &mut imdecode(
+            //         &vec_to_opencv_vector(match_card.image.clone().unwrap()),
+            //         opencv::imgcodecs::IMREAD_GRAYSCALE,
+            //     )
+            //     .unwrap()
+            //     .clone();
 
-                features2d::draw_keypoints(
-                    &mut img.clone(),
-                    &best_keypoints.unwrap(),
-                    &mut img,
-                    opencv::core::Scalar::new(0.0, 255.0, 0.0, 0.0),
-                    features2d::DrawMatchesFlags::DEFAULT,
-                )?;
+            //     features2d::draw_keypoints(
+            //         &mut img.clone(),
+            //         &best_keypoints.unwrap(),
+            //         &mut img,
+            //         opencv::core::Scalar::new(0.0, 255.0, 0.0, 0.0),
+            //         features2d::DrawMatchesFlags::DEFAULT,
+            //     )?;
 
-                highgui::imshow(window, &img.clone()).expect("display image");
+            //     highgui::imshow(window, &img.clone()).expect("display image");
 
-                // let mut match_img_display = Mat::default();
-                // features2d::draw_matches(
-                //     &frame,
-                //     &keypoints,
-                //     &img,
-                //     &best_keypoints.unwrap(),
-                //     &matches,
-                //     &mut match_img_display,
-                //     Scalar::new(0.0, 0.0, 255.0, 0.0),
-                //     Scalar::new(0.0, 255.0, 0.0, 0.0),
-                //     &Vector::<Mat>::new(),
-                //     DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS,
-                // );
-            }
+            //     // let mut match_img_display = Mat::default();
+            //     // features2d::draw_matches(
+            //     //     &frame,
+            //     //     &keypoints,
+            //     //     &img,
+            //     //     &best_keypoints.unwrap(),
+            //     //     &matches,
+            //     //     &mut match_img_display,
+            //     //     Scalar::new(0.0, 0.0, 255.0, 0.0),
+            //     //     Scalar::new(0.0, 255.0, 0.0, 0.0),
+            //     //     &Vector::<Mat>::new(),
+            //     //     DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS,
+            //     // );
+            // }
         }
 
         highgui::imshow(window, &frame_with_keypoints).expect("display image");

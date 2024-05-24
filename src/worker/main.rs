@@ -7,11 +7,19 @@ use futures::stream;
 use futures::StreamExt;
 use my_lib::db;
 use my_lib::models::NewCard;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
+use tokio::time;
 use tracing::info;
-
 mod http_client;
 mod workers;
+use std::sync::Once;
+
+static ONCE: Once = Once::new();
+
+fn cleanup() {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,14 +27,16 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let base_port = 4000;
-    let max_size = 1;
+    let max_size = 8;
 
     let drivers = workers::launch_drivers(base_port, max_size)?;
 
+    time::sleep(Duration::from_millis(500)).await;
+
     let pool = workers::create_pool(base_port, max_size).await;
 
-    let mut dbconn = my_lib::db::establish_connection();
-
+    let dbconn = my_lib::db::establish_connection();
+    let (tx, mut rx) = mpsc::channel(max_size);
     let mgr1 = pool.get().await.expect("get browser");
 
     mgr1.goto(
@@ -37,59 +47,91 @@ async fn main() -> Result<()> {
 
     let total_pages = get_total_pages(&mgr1).await?;
 
+    // let cleanup_closure = move || {
+    //     println!("closing drivers");
+
+    //     workers::close_drivers(drivers);
+
+    //     cleanup();
+    // };
+
+    // ONCE.call_once(cleanup_closure);
+
     println!("total pages: {}", total_pages);
 
     drop(mgr1);
 
-    for page in 1..100 {
-        let mgr_page = pool.get().await.expect("get browser");
-        let page_url = format!("https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&page={}&view=grid", page);
+    let mut jobs = Vec::<JoinHandle<()>>::new();
 
-        mgr_page.goto(page_url.as_str()).await?;
+    let shared_pool = Arc::new(pool);
 
-        mgr_page
-            .wait()
-            .at_most(Duration::from_secs(15))
-            .for_element(Locator::Css(".search-result a"))
-            .await?;
+    for page in 1..=10 {
+        let tx = tx.clone();
+        let pool = shared_pool.clone();
+        let job = tokio::spawn(async move {
+            if let Err(e) = fetch_cards_list_page(page, pool, tx).await {
+                eprintln!("Error fetching card details for page {}: {}", page, e);
+            }
+        });
 
-        let cards = parse_cards(&mgr_page).await?;
+        jobs.push(job);
+    }
 
-        drop(mgr_page);
+    drop(tx); // Stop sending new tasks
 
-        for card in cards {
-            let mgr_card = pool.get().await.expect("get browser for card details");
-
-            println!("going to card url: {:?}", card);
-
-            mgr_card.goto(card.as_str()).await?;
-
-            mgr_card
-                .wait()
-                .at_most(Duration::from_secs(15))
-                .for_element(Locator::Css(".v-lazy-image-loaded"))
-                .await?;
-
-            let card_info = get_card_info(&mgr_card).await?;
-
-            let new_card: NewCard = NewCard {
-                title: &card_info.title,
-                image: card_info.image.map(|b| b.to_vec()),
-                price: card_info.price,
-                url: card_info.url.as_deref(),
-                image_url: card_info.image_url,
-            };
-
-            db::insert_card(&mut dbconn, new_card)?;
-
-            drop(mgr_card);
+    // Receive and process card details concurrently
+    let dbconn = Arc::new(Mutex::new(dbconn));
+    while let Some(card_info) = rx.recv().await {
+        let mut dbconn = dbconn.lock().await;
+        if let Err(e) = db::insert_card(&mut dbconn, card_info) {
+            eprintln!("Error inserting card: {}", e);
         }
     }
 
-    pool.close();
-    drop(pool);
+    for h in jobs {
+        h.await?;
+    }
 
-    workers::close_drivers(drivers);
+    // pool.close();
+    // drop(pool);
+
+    // workers::close_drivers(drivers);
+
+    Ok(())
+}
+
+async fn fetch_cards_list_page(
+    page: i32,
+    pool: Arc<workers::Pool<Client>>,
+    tx: mpsc::Sender<NewCard>,
+) -> Result<()> {
+    let mgr_page = pool.get().await.expect("get browser");
+    let page_url = format!("https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&page={}&view=grid", page);
+
+    println!("fetch page {}", page_url);
+
+    mgr_page.goto(page_url.as_str()).await?;
+
+    mgr_page
+        .wait()
+        .at_most(Duration::from_secs(15))
+        .for_element(Locator::Css(".search-result a"))
+        .await?;
+
+    let cards = parse_cards(&mgr_page).await?;
+
+    drop(mgr_page);
+
+    for card in cards {
+        let mgr_card = pool.get().await.expect("get browser for card details");
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = fetch_card_info(mgr_card, card, tx).await {
+                eprintln!("Error fetching card info: {}", e);
+            }
+        });
+    }
 
     Ok(())
 }
@@ -100,6 +142,35 @@ struct CardInfo {
     price: Option<f64>,
     url: Option<String>,
     image_url: Option<String>,
+}
+
+async fn fetch_card_info(
+    mgr_card: deadpool::unmanaged::Object<Client>,
+    card: String,
+    tx: mpsc::Sender<NewCard>,
+) -> Result<()> {
+    mgr_card.goto(card.as_str()).await?;
+
+    mgr_card
+        .wait()
+        .at_most(Duration::from_secs(15))
+        .for_element(Locator::Css(".v-lazy-image-loaded"))
+        .await?;
+
+    let card_info = get_card_info(&mgr_card).await?;
+
+    let new_card: NewCard = NewCard {
+        title: card_info.title,
+        image: card_info.image.map(|b| b.to_vec()),
+        price: card_info.price,
+        url: card_info.url,
+        image_url: card_info.image_url,
+    };
+
+    drop(mgr_card);
+    tx.send(new_card).await?;
+
+    Ok(())
 }
 
 async fn get_card_info(client: &Client) -> Result<CardInfo> {
