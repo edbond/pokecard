@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
 
     let shared_pool = Arc::new(pool);
 
-    for page in 1..=10 {
+    for page in 40..80 {
         let tx = tx.clone();
         let pool = shared_pool.clone();
         let job = tokio::spawn(async move {

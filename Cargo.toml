@@ -34,10 +34,16 @@ test = false
 bench = false
 path = "src/overlay/main.rs"
 
+[[bin]]
+name = "http_worker"
+test = false
+bench = false
+path = "src/http_worker/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+reqwest = { version = "0.12.4", features = ["json", "gzip"] }
 mylib = { path = "lib" }
 anyhow = "1.0.79"
 bytes = "1.6.0"
@@ -48,7 +54,6 @@ fantoccini = "0.19.3"
 futures = "0.3.30"
 log = "0.4.20"
 opencv = "0.91.3"
-reqwest = "0.12.4"
 serde_json = "1.0.116"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.40"
@@ -57,3 +62,6 @@ indicatif = "0.17.8"
 rayon = "1.10.0"
 ratatui = "0.26.3"
 crossterm = "0.27.0"
+env_logger = "0.11.3"
+serde = "1.0.202"
+serde_derive = "1.0.202"
