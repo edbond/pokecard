@@ -4,11 +4,15 @@ use futures::{
     executor::block_on,
     stream::{iter, StreamExt},
 };
+use indicatif::ProgressBar;
 use my_lib::{db, models::NewCard};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::{self, Client, Method, Request, Url};
 use response::Result2;
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender};
+use std::{
+    sync::mpsc::{channel, sync_channel, Receiver, Sender},
+    time::Instant,
+};
 use tokio::runtime::Runtime;
 
 mod response;
@@ -42,7 +46,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    for i in 320..640 {
+    let pages = 640;
+    let pb = ProgressBar::new(pages);
+
+    for i in 0..pages {
         let payload = page_payload.replace(r#"from":0"#, &format!(r#"from":{}"#, i * 24));
 
         // println!("{}", payload);
@@ -71,7 +78,10 @@ async fn main() -> Result<()> {
                 eprintln!("{:?}", err);
             }
         }
+        pb.inc(1);
     }
+
+    pb.finish();
 
     Ok(())
 }

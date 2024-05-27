@@ -22,6 +22,30 @@ To run the project, use the command `cargo run` from the project's root director
 
 Please note that as this is a Rust project, you will need to have Rust and Cargo installed on your system. If you do not have these installed, you can do so by following the instructions on the [official Rust website](https://www.rust-lang.org/tools/install).
 
+### Migrate db
+
+To run migrations execute in terminal in `lib/` folder:
+
+```sh
+lib/ > diesel migration run
+Running migration 2024-05-03-031341_create_cards
+Running migration 2024-05-03-215919_add_timestamps
+Running migration 2024-05-04-010216_add_url
+Running migration 2024-05-04-013610_add-image-url
+```
+
+### Fetch data
+
+Run http worker to fetch data and images and store in sqlite db
+
+```sh
+cargo run --bin=http_worker
+```
+
+### Access sqlite database
+
+Use [sqlean](https://github.com/nalgeon/sqlean) to access db
+
 ## Contributing
 
 Contributions are welcome. Please feel free to open an issue or submit a pull request.
