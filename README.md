@@ -42,6 +42,16 @@ Run http worker to fetch data and images and store in sqlite db
 cargo run --bin=http_worker
 ```
 
+There is a worker that uses Chrome driver (browsers) to fetch data from web page - see `src/worker` folder.
+
+### Run opencv image similarity
+
+ORB [Oriented FAST and Rotated BRIEF](https://en.wikipedia.org/wiki/Oriented_FAST_and_rotated_BRIEF) algorithm is used to find most similar image
+
+```sh
+cargo run --bin=orb
+```
+
 ### Access sqlite database
 
 Use [sqlean](https://github.com/nalgeon/sqlean) to access db
