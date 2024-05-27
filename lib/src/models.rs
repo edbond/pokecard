@@ -36,11 +36,10 @@ impl Card {
     pub fn all_cards(conn: &mut SqliteConnection) -> Vec<Card> {
         cards::table
             .select(Card::as_select())
-            // .filter(cards::title.like("%Biba%"))
-            .filter(cards::id.ne(1651).and(cards::id.ne(2357)))
-            .filter(cards::title.not_like("%Water Energy%"))
+            .filter(cards::image.is_not_null())
+            .limit(100)
             .get_results(conn)
-            .unwrap()
+            .expect("fetch cards")
 
         // sql_query("SELECT * FROM cards").load(conn).unwrap()
     }

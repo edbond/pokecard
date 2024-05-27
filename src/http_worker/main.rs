@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    for i in 10..80 {
+    for i in 320..640 {
         let payload = page_payload.replace(r#"from":0"#, &format!(r#"from":{}"#, i * 24));
 
         // println!("{}", payload);
