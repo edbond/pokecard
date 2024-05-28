@@ -33,11 +33,12 @@ impl Hash for Card {
 }
 
 impl Card {
-    pub fn all_cards(conn: &mut SqliteConnection) -> Vec<Card> {
+    pub fn all_cards(conn: &mut SqliteConnection, limit: i64) -> Vec<Card> {
         cards::table
             .select(Card::as_select())
             .filter(cards::image.is_not_null())
-            .limit(100)
+            .limit(limit)
+            .order(cards::id)
             .get_results(conn)
             .expect("fetch cards")
 

@@ -1,24 +1,23 @@
 use anyhow::Result;
+use clap::{command, Parser};
 use indicatif::ProgressBar;
 use my_lib::{db, models::Card};
 use opencv::core::{
-    DMatch, KeyPoint, MatTrait, MatTraitConst, MatTraitConstManual, Ptr, RangeTraitConst, Rect,
-    Scalar, VectorToVec, CV_32F, CV_32FC4, NORM_HAMMING,
+    DMatch, KeyPoint, KeyPointTrait, KeyPointTraitConst, MatTraitConst, Ptr, Rect, Scalar,
+    VectorToVec, CV_32F, CV_32FC1, CV_32FC4,
 };
-use opencv::features2d::{BFMatcher, DescriptorMatcherTrait, FlannBasedMatcher};
-use opencv::flann::{self, IndexParamsTrait, SearchParamsTraitConst};
-use opencv::imgcodecs::{imread, IMREAD_GRAYSCALE};
+use opencv::features2d::{DescriptorMatcherTrait, DescriptorMatcherTraitConst, FlannBasedMatcher};
+use opencv::flann::{self};
 use opencv::imgproc::COLOR_BGR2BGRA;
-use opencv::traits::Boxed;
 use opencv::videoio::{VideoCaptureTrait, VideoCaptureTraitConst};
+use opencv::{core, highgui, imgcodecs, imgproc, objdetect, videoio, Error};
 use opencv::{
     core::{Mat, Vector},
     features2d::{self, Feature2DTrait, ORB},
-    imgcodecs::imdecode,
 };
-use opencv::{highgui, imgproc::cvt_color, videoio};
 use rayon::prelude::*;
 use std::time::Instant;
+use tracing::{debug, info};
 use tracing_subscriber::fmt;
 
 fn vec_to_opencv_vector(data: Vec<u8>) -> Vector<u8> {
@@ -28,10 +27,21 @@ fn vec_to_opencv_vector(data: Vec<u8>) -> Vector<u8> {
     opencv_vector
 }
 
-fn load_cards_from_db() -> Result<Vec<Card>> {
+fn load_cards_from_db(limit: i64) -> Result<Vec<Card>> {
     let mut conn = db::establish_connection();
 
-    Ok(Card::all_cards(&mut conn))
+    Ok(Card::all_cards(&mut conn, limit))
+}
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    train: bool,
+
+    #[arg(short, long)]
+    cards: i64,
 }
 
 fn main() -> Result<()> {
@@ -40,11 +50,17 @@ fn main() -> Result<()> {
         .with_test_writer()
         .init();
 
-    let cards = load_cards_from_db()?;
+    let args = Args::parse();
 
-    let pb = ProgressBar::new(cards.len().try_into().unwrap());
+    let mut matcher = FlannBasedMatcher::new(
+        &Ptr::new(flann::KDTreeIndexParams::new(4)?.into()),
+        &Ptr::new(flann::SearchParams::new_1(32, 0.0, false)?),
+    )?;
 
-    let mut t1 = Instant::now();
+    let t1 = Instant::now();
+
+    let cards = load_cards_from_db(args.cards)?;
+    let mut pb = ProgressBar::new(cards.len() as u64).with_message("loading cards from db");
 
     let card_descriptors: Vec<(Mat, Vector<KeyPoint>, &Card)> = cards
         .par_iter()
@@ -56,7 +72,7 @@ fn main() -> Result<()> {
                     return vec;
                 }
 
-                let img = &mut imdecode(
+                let img = &mut imgcodecs::imdecode(
                     &vec_to_opencv_vector(card.image.clone().unwrap()),
                     opencv::imgcodecs::IMREAD_GRAYSCALE,
                 )
@@ -65,7 +81,7 @@ fn main() -> Result<()> {
 
                 // Create an ORB object
                 let mut orb = ORB::create(
-                    500,
+                    200,
                     1.2,
                     8,
                     31,
@@ -85,6 +101,7 @@ fn main() -> Result<()> {
                     .expect("orb detect");
 
                 vec.push((orb_desc, keypoints, card));
+                pb.inc(1);
 
                 vec
             },
@@ -92,7 +109,6 @@ fn main() -> Result<()> {
         .reduce(
             || vec![],
             |mut acc, x| {
-                pb.inc(x.len() as u64);
                 acc.extend(x);
                 acc
             },
@@ -101,24 +117,31 @@ fn main() -> Result<()> {
     pb.finish();
 
     let duration = t1.elapsed();
-    println!("done in {:?}", duration);
+    tracing::info!(duration=?duration, "done loading cards");
 
-    t1 = Instant::now();
-    let mut matcher = FlannBasedMatcher::new(
-        &Ptr::new(flann::KDTreeIndexParams::new_def()?.into()),
-        &Ptr::new(flann::SearchParams::new_1(50, 0.0, true)?),
-    )?;
+    if args.train {
+        info!("descriptors: {}", card_descriptors.len());
+        pb = ProgressBar::new(card_descriptors.len() as u64).with_message("training");
 
-    println!("descs {}", card_descriptors.len());
+        for (desc, _, _) in card_descriptors.iter() {
+            let size = desc.size()?;
+            let mut d = unsafe { Mat::new_size(size, CV_32FC1)? };
+            desc.convert_to(&mut d, CV_32F, 1.0 / 255.0, 0.0)?;
 
-    for (i, (desc, _, _)) in card_descriptors.iter().enumerate() {
-        println!("{} {:?}", i, desc);
+            matcher.add(&d).expect("card added to index");
 
-        matcher.add(&desc).expect("card added to index");
+            pb.inc(1);
+        }
+
+        pb.finish();
+
+        matcher.train().expect("train matcher");
+        info!("Training done in {:?}", t1.elapsed());
+
+        matcher.write("matcher.model")?;
+    } else {
+        matcher.read("matcher.model")?;
     }
-
-    matcher.train().expect("train matcher");
-    println!("Training done in {:?}", t1.elapsed());
 
     let window = "camera";
     highgui::named_window(window, highgui::WINDOW_AUTOSIZE)?;
@@ -130,7 +153,7 @@ fn main() -> Result<()> {
 
     // Create an ORB object
     let mut orb = ORB::create(
-        500,
+        200,
         1.2,
         8,
         31,
@@ -148,26 +171,54 @@ fn main() -> Result<()> {
     // typical card ratio
     let ratio = 264.0 / 368.0;
 
+    let font = imgproc::FONT_HERSHEY_SIMPLEX;
+    let font_scale = 0.8;
+    let font_color = Scalar::new(255.0, 255.0, 255.0, 0.0); // White color
+    let thickness = 2;
+
+    let mut capture = true;
+
+    let mut grey = Mat::default();
+    let mask = Mat::default();
+
+    let mut top_match: Option<DMatch> = None;
+
     loop {
-        cam.read(&mut frame)?;
+        if capture {
+            cam.read(&mut frame)?;
+        }
+
         if frame.size()?.width <= 0 {
             break;
         }
 
-        let t1 = Instant::now();
-        let (frame_with_overlay, crop) = add_overlay(&frame, 5, ratio)?;
-        println!("add overlay took {:?}", t1.elapsed());
+        let (frame_with_overlay, crop, hole) = add_overlay(&frame, 5, ratio)?;
+        // println!("add overlay took {:?}", t1.elapsed());
+
+        imgproc::cvt_color(&crop, &mut grey, COLOR_BGR2BGRA, 4)?;
 
         let mut keypoints = Vector::default();
         let mut query_desc = Mat::default();
-        let mask = Mat::default();
 
         let t1 = Instant::now();
 
-        orb.detect_and_compute(&crop, &mask, &mut keypoints, &mut query_desc, false)
+        orb.detect_and_compute(&grey, &mask, &mut keypoints, &mut query_desc, false)
             .expect("orb detect");
 
-        println!("orb detect and compute took {:?}", t1.elapsed());
+        // println!("orb detect and scompute took {:?}", t1.elapsed());
+        // Move the keypoints by the specified offsets
+        keypoints = keypoints
+            .iter()
+            .map(|keypoint| {
+                let mut point = keypoint.pt();
+                point.x += hole.x as f32;
+                point.y += hole.y as f32;
+
+                let mut k = KeyPoint::default().expect("new keypoint");
+                k.set_pt(point);
+                k
+            })
+            .collect();
 
         // Draw keypoints on the image
         features2d::draw_keypoints(
@@ -179,67 +230,56 @@ fn main() -> Result<()> {
         )
         .expect("keypoints drawn");
 
-        let mut matches = Vector::<DMatch>::new();
-        matcher
-            .match_(&query_desc, &mut matches, &Mat::default())
-            .expect("match_ call");
+        let mut matches: Vector<DMatch> = Vector::new();
 
-        let mut matches_vec = matches.to_vec();
+        let size = query_desc.size()?;
+        let mut d = unsafe { Mat::new_size(size, CV_32FC1)? };
+        query_desc.convert_to(&mut d, CV_32F, 1.0 / 255.0, 0.0)?;
 
-        matches_vec
-            // .iter()
-            // .filter(|m| m.distance <= 12.0)
-            .sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        matcher.match_(&d, &mut matches, &Mat::default())?;
 
-        matches = matches_vec.into();
+        // info!("matches {:?}", matches);
 
-        println!(
-            "Top 5 matches: {:?}",
-            matches.iter().take(5).collect::<Vector<DMatch>>()
-        );
+        let matches_vec = matches.to_vec();
 
-        let top_match = matches.get(0)?;
-        let (_, _, top_card) = card_descriptors.get(top_match.img_idx as usize).unwrap();
+        let mut closest: Vec<_> = matches_vec.iter().filter(|m| m.distance <= 0.3).collect();
 
-        println!("top card: {} {}", top_card.id, top_card.title);
+        closest.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
 
-        // if let Some(match_card) = best_match {
-        //     println!(
-        //         "best match: ({:?}) {} {}",
-        //         best_score, match_card.id, match_card.title
-        //     );
+        let matches: opencv::core::Vector<DMatch> = closest
+            .iter()
+            .map(|&m| m.clone())
+            .collect::<Vec<DMatch>>()
+            .into();
 
-        //     let mut img = &mut imdecode(
-        //         &vec_to_opencv_vector(match_card.image.clone().unwrap()),
-        //         opencv::imgcodecs::IMREAD_GRAYSCALE,
-        //     )
-        //     .unwrap()
-        //     .clone();
+        if !matches.is_empty() {
+            println!(
+                "Top 5 matches: {:?}",
+                matches.iter().take(5).collect::<Vector<DMatch>>()
+            );
+        }
 
-        //     features2d::draw_keypoints(
-        //         &mut img.clone(),
-        //         &best_keypoints.unwrap(),
-        //         &mut img,
-        //         opencv::core::Scalar::new(0.0, 255.0, 0.0, 0.0),
-        //         features2d::DrawMatchesFlags::DEFAULT,
-        //     )?;
+        if let Ok(new_top) = matches.get(0) {
+            top_match = Some(new_top);
+        }
 
-        //     highgui::imshow(window, &img.clone()).expect("display image");
+        if let Some(top_match) = top_match {
+            let (_, _, top_card) = card_descriptors.get(top_match.img_idx as usize).unwrap();
 
-        //     // let mut match_img_display = Mat::default();
-        //     // features2d::draw_matches(
-        //     //     &frame,
-        //     //     &keypoints,
-        //     //     &img,
-        //     //     &best_keypoints.unwrap(),
-        //     //     &matches,
-        //     //     &mut match_img_display,
-        //     //     Scalar::new(0.0, 0.0, 255.0, 0.0),
-        //     //     Scalar::new(0.0, 255.0, 0.0, 0.0),
-        //     //     &Vector::<Mat>::new(),
-        //     //     DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS,
-        //     // );
-        // }
+            // println!("top card: {} {}", top_card.id, top_card.title);
+
+            imgproc::put_text(
+                &mut frame_with_keypoints,
+                top_card.title.as_str(),
+                core::Point::new(10, 30),
+                font,
+                font_scale,
+                font_color,
+                thickness,
+                imgproc::LINE_AA,
+                false,
+            )?;
+        }
 
         if frame_with_keypoints.size()?.width <= 0 {
             continue;
@@ -248,6 +288,11 @@ fn main() -> Result<()> {
         highgui::imshow(window, &frame_with_keypoints).expect("display image");
 
         let key = highgui::wait_key(10)?;
+        if key == 'f' as i32 {
+            capture = !capture;
+            continue;
+        }
+
         if key > 0 && key != 255 {
             break;
         }
@@ -256,12 +301,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, Mat)> {
+fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, Mat, Rect)> {
     let size = frame.size()?;
     let mut frame4 = unsafe { Mat::new_size(size, CV_32FC4)? };
 
     // Add alpha channel to frame
-    cvt_color(&frame, &mut frame4, COLOR_BGR2BGRA, 4)?;
+    imgproc::cvt_color(&frame, &mut frame4, COLOR_BGR2BGRA, 4)?;
 
     // % of the border from top
     let border_size = (size.height as f32) * border_percentage as f32 / 100.0;
@@ -279,7 +324,7 @@ fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, 
     opencv::imgproc::rectangle(
         &mut mask,
         hole_rect,
-        Scalar::new(1.0, 255.0, 1.0, 0.0),
+        Scalar::new(1.0, 1.0, 1.0, 0.0),
         -1,
         opencv::imgproc::LINE_4,
         0,
@@ -289,5 +334,5 @@ fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, 
 
     opencv::core::multiply(&frame4, &mask, &mut dst, 1.0, 8)?;
 
-    Ok((dst, crop))
+    Ok((dst, crop, hole_rect))
 }

@@ -65,3 +65,4 @@ crossterm = "0.27.0"
 env_logger = "0.11.3"
 serde = "1.0.202"
 serde_derive = "1.0.202"
+clap = { version = "4.5.4", features = ["derive"] }

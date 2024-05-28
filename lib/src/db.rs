@@ -23,8 +23,8 @@ pub fn insert_card(conn: &mut SqliteConnection, card: NewCard) -> Result<()> {
     Ok(())
 }
 
-pub fn get_images(conn: &mut SqliteConnection) -> Result<Vec<Card>> {
-    let images = Card::all_cards(conn);
+pub fn get_images(conn: &mut SqliteConnection, limit: i64) -> Result<Vec<Card>> {
+    let images = Card::all_cards(conn, limit);
 
     Ok(images)
 }
