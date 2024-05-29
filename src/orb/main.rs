@@ -1,10 +1,11 @@
 use anyhow::Result;
 use clap::{command, Parser};
 use indicatif::ProgressBar;
+use keyed_priority_queue::KeyedPriorityQueue;
 use my_lib::{db, models::Card};
 use opencv::core::{
-    DMatch, KeyPoint, KeyPointTrait, KeyPointTraitConst, MatTraitConst, Ptr, Rect, Scalar,
-    VectorToVec, CV_32F, CV_32FC1, CV_32FC4,
+    AlgorithmTrait, DMatch, KeyPoint, KeyPointTrait, KeyPointTraitConst, MatTraitConst, Ptr, Rect,
+    Scalar, VectorToVec, CV_32F, CV_32FC1, CV_32FC4,
 };
 use opencv::features2d::{DescriptorMatcherTrait, DescriptorMatcherTraitConst, FlannBasedMatcher};
 use opencv::flann::{self};
@@ -16,6 +17,7 @@ use opencv::{
     features2d::{self, Feature2DTrait, ORB},
 };
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, info};
 use tracing_subscriber::fmt;
@@ -137,10 +139,6 @@ fn main() -> Result<()> {
 
         matcher.train().expect("train matcher");
         info!("Training done in {:?}", t1.elapsed());
-
-        matcher.write("matcher.model")?;
-    } else {
-        matcher.read("matcher.model")?;
     }
 
     let window = "camera";
@@ -150,20 +148,6 @@ fn main() -> Result<()> {
     if !opened {
         panic!("Unable to open default camera!");
     }
-
-    // Create an ORB object
-    let mut orb = ORB::create(
-        200,
-        1.2,
-        8,
-        31,
-        0,
-        2,
-        features2d::ORB_ScoreType::HARRIS_SCORE,
-        31,
-        20,
-    )
-    .expect("orb created");
 
     let mut frame = Mat::default();
     let mut frame_with_keypoints = frame.clone();
@@ -202,6 +186,20 @@ fn main() -> Result<()> {
 
         let t1 = Instant::now();
 
+        // Create an ORB object
+        let mut orb = ORB::create(
+            200,
+            1.2,
+            8,
+            31,
+            0,
+            2,
+            features2d::ORB_ScoreType::HARRIS_SCORE,
+            31,
+            20,
+        )
+        .expect("orb created");
+
         orb.detect_and_compute(&grey, &mask, &mut keypoints, &mut query_desc, false)
             .expect("orb detect");
 
@@ -230,41 +228,62 @@ fn main() -> Result<()> {
         )
         .expect("keypoints drawn");
 
-        let mut matches: Vector<DMatch> = Vector::new();
+        let mut matches: Vector<Vector<DMatch>> = Vector::new();
 
         let size = query_desc.size()?;
         let mut d = unsafe { Mat::new_size(size, CV_32FC1)? };
         query_desc.convert_to(&mut d, CV_32F, 1.0 / 255.0, 0.0)?;
 
-        matcher.match_(&d, &mut matches, &Mat::default())?;
+        matcher.knn_match(&d, &mut matches, 10, &Mat::default(), false)?;
+        // matcher.radius_match(&d, &mut matches, 20.0, &Mat::default(), false)?;
 
-        // info!("matches {:?}", matches);
+        // k = 2
+        // [DMatch { query_idx: 185, train_idx: 124, img_idx: 801, distance: 1.2009865 },
+        //  DMatch { query_idx: 185, train_idx: 26, img_idx: 251, distance: 1.2637557 }]
+        //
+        // k = 4
+        // [DMatch { query_idx: 193, train_idx: 178, img_idx: 172, distance: 0.84797525 },
+        //  DMatch { query_idx: 193, train_idx: 128, img_idx: 606, distance: 1.1964127 },
+        //  DMatch { query_idx: 193, train_idx: 11, img_idx: 550, distance: 1.3276408 },
+        //  DMatch { query_idx: 193, train_idx: 11, img_idx: 998, distance: 1.3276408 }]
+        info!(
+            "matches {:?} {}",
+            matches.iter().take(10).collect::<Vector<Vector<DMatch>>>(),
+            matches.len()
+        );
 
-        let matches_vec = matches.to_vec();
+        // [DMatch { query_idx: 0, train_idx: 121, img_idx: 225, distance: 0.71997905 },
+        //  DMatch { query_idx: 0, train_idx: 121, img_idx: 886, distance: 0.71997905 },
+        //  DMatch { query_idx: 0, train_idx: 183, img_idx: 685, distance: 0.81025726 },
+        //  DMatch { query_idx: 0, train_idx: 10, img_idx: 613, distance: 0.86896163 },
+        //  DMatch { query_idx: 0, train_idx: 92, img_idx: 713, distance: 0.9205669 },
+        //  DMatch { query_idx: 0, train_idx: 140, img_idx: 560, distance: 1.0101523 },
+        //  DMatch { query_idx: 0, train_idx: 132, img_idx: 530, distance: 1.0755327 },
+        //  DMatch { query_idx: 0, train_idx: 132, img_idx: 976, distance: 1.0755327 },
+        //  DMatch { query_idx: 0, train_idx: 162, img_idx: 261, distance: 1.1032162 },
+        //  DMatch { query_idx: 0, train_idx: 129, img_idx: 497, distance: 1.1079733 }]
 
-        let mut closest: Vec<_> = matches_vec.iter().filter(|m| m.distance <= 0.3).collect();
-
-        closest.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
-
-        let matches: opencv::core::Vector<DMatch> = closest
-            .iter()
-            .map(|&m| m.clone())
-            .collect::<Vec<DMatch>>()
-            .into();
-
-        if !matches.is_empty() {
-            println!(
-                "Top 5 matches: {:?}",
-                matches.iter().take(5).collect::<Vector<DMatch>>()
-            );
+        // get most img_idx
+        let mut freq = HashMap::<i32, u32>::new();
+        for m in matches {
+            for v in m {
+                *freq.entry(v.img_idx).or_insert(0) += 1;
+            }
         }
 
-        if let Ok(new_top) = matches.get(0) {
-            top_match = Some(new_top);
+        // priority queue to find most frequent img_idx
+        let mut pq = KeyedPriorityQueue::<i32, u32>::new();
+        for (img_idx, f) in freq.iter() {
+            pq.push(*img_idx, *f);
+        }
+
+        let top_match = pq.pop();
+        if let Some((top_img_idx, top_freq)) = top_match {
+            info!("top match {:?}", top_match);
         }
 
         if let Some(top_match) = top_match {
-            let (_, _, top_card) = card_descriptors.get(top_match.img_idx as usize).unwrap();
+            let (_, _, top_card) = card_descriptors.get(top_match.0 as usize).unwrap();
 
             // println!("top card: {} {}", top_card.id, top_card.title);
 
@@ -280,6 +299,11 @@ fn main() -> Result<()> {
                 false,
             )?;
         }
+
+        info!(
+            "train descriptors: {}",
+            matcher.get_train_descriptors()?.len()
+        );
 
         if frame_with_keypoints.size()?.width <= 0 {
             continue;
