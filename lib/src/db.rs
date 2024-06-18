@@ -1,6 +1,5 @@
 use crate::{
     models::{Card, NewCard},
-    schema::cards::dsl::*,
 };
 use anyhow::Result;
 use diesel::prelude::*;

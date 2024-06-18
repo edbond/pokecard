@@ -1,18 +1,10 @@
 use anyhow::Result;
 use diesel::SqliteConnection;
-use futures::{
-    executor::block_on,
-    stream::{iter, StreamExt},
-};
 use indicatif::ProgressBar;
 use my_lib::{db, models::NewCard};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use reqwest::{self, Client, Method, Request, Url};
+use reqwest::{self, Client, Url};
 use response::Result2;
-use std::{
-    sync::mpsc::{channel, sync_channel, Receiver, Sender},
-    time::Instant,
-};
+use std::sync::mpsc::sync_channel;
 use tokio::runtime::Runtime;
 
 mod response;
@@ -46,7 +38,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let pages = 640;
+    let pages = 417;
     let pb = ProgressBar::new(pages);
 
     for i in 0..pages {
