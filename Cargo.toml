@@ -3,24 +3,14 @@ name = "worker"
 version = "0.1.0"
 edition = "2021"
 
+# [lib]
+# crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "worker"
 test = false
 bench = false
 path = "src/worker/main.rs"
-
-[[bin]]
-name = "cam"
-test = false
-bench = false
-path = "src/cam/main.rs"
-
-[[bin]]
-name = "cv"
-test = false
-bench = false
-path = "src/cv/main.rs"
-
 
 [[bin]]
 name = "orb"
@@ -29,16 +19,16 @@ bench = false
 path = "src/orb/main.rs"
 
 [[bin]]
-name = "overlay"
-test = false
-bench = false
-path = "src/overlay/main.rs"
-
-[[bin]]
 name = "http_worker"
 test = false
 bench = false
 path = "src/http_worker/main.rs"
+
+[[bin]]
+name = "gui"
+test = false
+bench = false
+path = "src/gui/gui.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -67,3 +57,8 @@ serde = "1.0.202"
 serde_derive = "1.0.202"
 clap = { version = "4.5.4", features = ["derive"] }
 keyed_priority_queue = "0.4.2"
+egui = "0.27.2"
+egui_glow = "0.27.2"
+egui-winit = "0.27.2"
+eframe = "0.27.2"
+egui_extras = "0.27.2"

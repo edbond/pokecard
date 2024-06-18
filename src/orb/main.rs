@@ -3,23 +3,29 @@ use clap::{command, Parser};
 use indicatif::ProgressBar;
 use keyed_priority_queue::KeyedPriorityQueue;
 use my_lib::{db, models::Card};
+use opencv::calib3d::find_homography_def;
 use opencv::core::{
     AlgorithmTrait, DMatch, KeyPoint, KeyPointTrait, KeyPointTraitConst, MatTraitConst, Ptr, Rect,
-    Scalar, VectorToVec, CV_32F, CV_32FC1, CV_32FC4,
+    Scalar, CV_32F, CV_32FC1, CV_32FC4,
 };
 use opencv::features2d::{DescriptorMatcherTrait, DescriptorMatcherTraitConst, FlannBasedMatcher};
 use opencv::flann::{self};
-use opencv::imgproc::COLOR_BGR2BGRA;
+use opencv::img_hash::ImgHashBaseTraitConst;
+use opencv::imgcodecs::{imread, imread_def, IMREAD_COLOR, IMREAD_GRAYSCALE};
+use opencv::imgproc::{warp_perspective, COLOR_BGR2BGRA, COLOR_BGR2GRAY};
 use opencv::videoio::{VideoCaptureTrait, VideoCaptureTraitConst};
-use opencv::{core, highgui, imgcodecs, imgproc, objdetect, videoio, Error};
+use opencv::{core, highgui, img_hash, imgcodecs, imgproc, videoio};
 use opencv::{
     core::{Mat, Vector},
     features2d::{self, Feature2DTrait, ORB},
 };
 use rayon::prelude::*;
+use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::HashMap;
-use std::time::Instant;
-use tracing::{debug, info};
+use std::io::Cursor;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+use tracing::info;
 use tracing_subscriber::fmt;
 
 fn vec_to_opencv_vector(data: Vec<u8>) -> Vector<u8> {
@@ -46,6 +52,38 @@ struct Args {
     cards: i64,
 }
 
+#[derive(Debug, Copy, Clone)]
+struct OrdFloat(f32);
+
+impl PartialOrd for OrdFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+
+impl Eq for OrdFloat {}
+
+impl PartialEq for OrdFloat {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(&other) == Ordering::Equal
+    }
+}
+
+impl Ord for OrdFloat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // self <operator> other
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(if self.0.is_nan() && other.0.is_nan() {
+                Ordering::Equal
+            } else if self.0.is_nan() {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            })
+    }
+}
+
 fn main() -> Result<()> {
     fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -55,16 +93,21 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let mut matcher = FlannBasedMatcher::new(
-        &Ptr::new(flann::KDTreeIndexParams::new(4)?.into()),
-        &Ptr::new(flann::SearchParams::new_1(32, 0.0, false)?),
+        &Ptr::new(flann::KDTreeIndexParams::new(8)?.into()),
+        &Ptr::new(flann::SearchParams::new_1(32, 0.1, true)?),
     )?;
+
+    // ORB settings
+    let edge_threshold = 16;
+    let orb_patch_size = 16;
+    let orb_features = 100;
 
     let t1 = Instant::now();
 
     let cards = load_cards_from_db(args.cards)?;
     let mut pb = ProgressBar::new(cards.len() as u64).with_message("loading cards from db");
 
-    let card_descriptors: Vec<(Mat, Vector<KeyPoint>, &Card)> = cards
+    let card_descriptors: Vec<(Mat, Vector<KeyPoint>, &Card, Mat, Mat)> = cards
         .par_iter()
         .fold(
             || Vec::new(),
@@ -81,16 +124,21 @@ fn main() -> Result<()> {
                 .unwrap()
                 .clone();
 
+                let mut hash1 = Mat::default();
+                if let Err(_) = opencv::img_hash::p_hash(img, &mut hash1) {
+                    return vec;
+                };
+
                 // Create an ORB object
                 let mut orb = ORB::create(
-                    200,
+                    orb_features,
                     1.2,
                     8,
-                    31,
+                    edge_threshold,
                     0,
                     2,
                     features2d::ORB_ScoreType::HARRIS_SCORE,
-                    31,
+                    orb_patch_size,
                     20,
                 )
                 .expect("orb created");
@@ -102,7 +150,7 @@ fn main() -> Result<()> {
                 orb.detect_and_compute(img, &mask, &mut keypoints, &mut orb_desc, false)
                     .expect("orb detect");
 
-                vec.push((orb_desc, keypoints, card));
+                vec.push((orb_desc, keypoints, card, img.to_owned(), hash1));
                 pb.inc(1);
 
                 vec
@@ -125,7 +173,7 @@ fn main() -> Result<()> {
         info!("descriptors: {}", card_descriptors.len());
         pb = ProgressBar::new(card_descriptors.len() as u64).with_message("training");
 
-        for (desc, _, _) in card_descriptors.iter() {
+        for (desc, _, _, _, _) in card_descriptors.iter() {
             let size = desc.size()?;
             let mut d = unsafe { Mat::new_size(size, CV_32FC1)? };
             desc.convert_to(&mut d, CV_32F, 1.0 / 255.0, 0.0)?;
@@ -160,16 +208,23 @@ fn main() -> Result<()> {
     let font_color = Scalar::new(255.0, 255.0, 255.0, 0.0); // White color
     let thickness = 2;
 
-    let mut capture = true;
+    let mut capture = false;
 
     let mut grey = Mat::default();
     let mask = Mat::default();
 
-    let mut top_match: Option<DMatch> = None;
+    let top_match: Option<DMatch> = None;
+
+    let mut mock_image = card_descriptors[1].3.clone();
+
+    // let mmm = imread("Photo on 6-4-24 at 7.06 PM.jpg", IMREAD_COLOR)?;
+    // imgproc::cvt_color(&mock_image.clone(), &mut mock_image, COLOR_BGR2GRAY, 4)?;
 
     loop {
         if capture {
             cam.read(&mut frame)?;
+        } else {
+            mock_image.copy_to(&mut frame)?;
         }
 
         if frame.size()?.width <= 0 {
@@ -179,7 +234,7 @@ fn main() -> Result<()> {
         let (frame_with_overlay, crop, hole) = add_overlay(&frame, 5, ratio)?;
         // println!("add overlay took {:?}", t1.elapsed());
 
-        imgproc::cvt_color(&crop, &mut grey, COLOR_BGR2BGRA, 4)?;
+        imgproc::cvt_color(&crop, &mut grey, COLOR_BGR2GRAY, 4)?;
 
         let mut keypoints = Vector::default();
         let mut query_desc = Mat::default();
@@ -188,14 +243,14 @@ fn main() -> Result<()> {
 
         // Create an ORB object
         let mut orb = ORB::create(
-            200,
+            orb_features,
             1.2,
             8,
-            31,
+            edge_threshold,
             0,
             2,
             features2d::ORB_ScoreType::HARRIS_SCORE,
-            31,
+            orb_patch_size,
             20,
         )
         .expect("orb created");
@@ -218,6 +273,23 @@ fn main() -> Result<()> {
             })
             .collect();
 
+        let mut hash1 = Mat::default();
+        img_hash::p_hash(&grey, &mut hash1)?;
+
+        for (_, _, card, _, card_hash) in card_descriptors.iter() {
+            // Compare the hashes
+            let ph = img_hash::PHash::create()?;
+            let diff = ph.compare(&hash1, card_hash)?;
+            println!("Difference between images: {}", diff);
+
+            // A smaller difference indicates more similar images
+            if diff < 20.0 {
+                println!("The images are visually similar {}", card.title);
+                // } else {
+                //     println!("The images are visually different");
+            }
+        }
+
         // Draw keypoints on the image
         features2d::draw_keypoints(
             &mut frame_with_overlay.clone(),
@@ -234,11 +306,11 @@ fn main() -> Result<()> {
         let mut d = unsafe { Mat::new_size(size, CV_32FC1)? };
         query_desc.convert_to(&mut d, CV_32F, 1.0 / 255.0, 0.0)?;
 
-        matcher.knn_match(&d, &mut matches, 10, &Mat::default(), false)?;
+        matcher.knn_match(&d, &mut matches, 4, &Mat::default(), false)?;
         // matcher.radius_match(&d, &mut matches, 20.0, &Mat::default(), false)?;
 
         // k = 2
-        // [DMatch { query_idx: 185, train_idx: 124, img_idx: 801, distance: 1.2009865 },
+        // [DMatch { query_idx: 185, train_idx: 124, img_idx: 801, distance: 1.orb_features9865 },
         //  DMatch { query_idx: 185, train_idx: 26, img_idx: 251, distance: 1.2637557 }]
         //
         // k = 4
@@ -264,28 +336,42 @@ fn main() -> Result<()> {
         //  DMatch { query_idx: 0, train_idx: 129, img_idx: 497, distance: 1.1079733 }]
 
         // get most img_idx
-        let mut freq = HashMap::<i32, u32>::new();
-        for m in matches {
+        let mut freq = HashMap::<i32, Vec<f32>>::new();
+        matches.clone().into_iter().for_each(|m| {
             for v in m {
-                *freq.entry(v.img_idx).or_insert(0) += 1;
+                // if v.distance < 0.5 {
+                //     continue;
+                // }
+
+                // *freq.entry(v.img_idx).or_insert(0.0) += 1.0; // v.distance;
+                freq.entry(v.img_idx).or_insert(Vec::new()).push(v.distance);
             }
-        }
+        });
+
+        // [d1, d2, d3] vs [d4]
+        //
 
         // priority queue to find most frequent img_idx
-        let mut pq = KeyedPriorityQueue::<i32, u32>::new();
-        for (img_idx, f) in freq.iter() {
-            pq.push(*img_idx, *f);
+        let mut pq = KeyedPriorityQueue::<i32, OrdFloat>::new();
+        for (img_idx, distances) in freq.iter() {
+            let len = distances.len() as f32;
+            let sum = distances.iter().map(|x| 1.0 - x).sum::<f32>() as f32;
+
+            pq.push(*img_idx, OrdFloat(sum * len));
         }
+
+        // info!("pq {:?}", pq);
 
         let top_match = pq.pop();
-        if let Some((top_img_idx, top_freq)) = top_match {
-            info!("top match {:?}", top_match);
-        }
 
         if let Some(top_match) = top_match {
-            let (_, _, top_card) = card_descriptors.get(top_match.0 as usize).unwrap();
+            info!("top match {:?}", top_match);
 
-            // println!("top card: {} {}", top_card.id, top_card.title);
+            let (_desc, card_keypoints, top_card, card_img, imghash) = card_descriptors
+                .get(top_match.0 as usize)
+                .expect("card found");
+
+            println!("top card: {} {}", top_card.id, top_card.title);
 
             imgproc::put_text(
                 &mut frame_with_keypoints,
@@ -297,6 +383,34 @@ fn main() -> Result<()> {
                 thickness,
                 imgproc::LINE_AA,
                 false,
+            )?;
+
+            let mut card_matches: Vector<DMatch> = Vector::default();
+            for m in matches {
+                for v in m {
+                    if v.img_idx == top_match.0 {
+                        card_matches.push(v);
+                    }
+                }
+            }
+
+            info!("card matches size {}", card_matches.len());
+
+            // let h = find_homography_def(card_img, &grey, &mut Mat::default())?;
+
+            // warp_perspective(src, dst, m, dsize, flags, border_mode, border_value)
+
+            features2d::draw_matches(
+                &frame_with_keypoints.clone(),
+                &keypoints,
+                card_img,
+                card_keypoints,
+                &card_matches,
+                &mut frame_with_keypoints,
+                Scalar::new(255.0, 0.0, 0.0, 1.0),
+                Scalar::new(0.0, 255.0, 0.0, 1.0),
+                &Vector::default(),
+                features2d::DrawMatchesFlags::DRAW_RICH_KEYPOINTS,
             )?;
         }
 
@@ -316,6 +430,8 @@ fn main() -> Result<()> {
             capture = !capture;
             continue;
         }
+
+        sleep(Duration::from_millis(300));
 
         if key > 0 && key != 255 {
             break;

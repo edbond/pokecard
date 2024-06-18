@@ -1,5 +1,5 @@
 use crate::schema::cards::{self};
-use diesel::{associations::HasTable, prelude::*, sql_query};
+use diesel::prelude::*;
 use std::hash::{Hash, Hasher};
 
 #[derive(Queryable, QueryableByName, Identifiable, Selectable, Debug, PartialEq)]
@@ -37,6 +37,11 @@ impl Card {
         cards::table
             .select(Card::as_select())
             .filter(cards::image.is_not_null())
+            .filter(
+                diesel::dsl::sql::<diesel::sql_types::Bool>("1=1"), // .or(cards::title.like("%aunter%"))
+                                                                    // .and(cards::title.like("%darkrai%")),
+                                                                    //.or(cards::id.le(1000)),
+            )
             .limit(limit)
             .order(cards::id)
             .get_results(conn)
