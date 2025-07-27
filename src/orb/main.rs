@@ -3,7 +3,6 @@ use clap::{command, Parser};
 use indicatif::ProgressBar;
 use keyed_priority_queue::KeyedPriorityQueue;
 use my_lib::{db, models::Card};
-use opencv::calib3d::find_homography_def;
 use opencv::core::{
     AlgorithmTrait, DMatch, KeyPoint, KeyPointTrait, KeyPointTraitConst, MatTraitConst, Ptr, Rect,
     Scalar, CV_32F, CV_32FC1, CV_32FC4,
@@ -11,8 +10,7 @@ use opencv::core::{
 use opencv::features2d::{DescriptorMatcherTrait, DescriptorMatcherTraitConst, FlannBasedMatcher};
 use opencv::flann::{self};
 use opencv::img_hash::ImgHashBaseTraitConst;
-use opencv::imgcodecs::{imread, imread_def, IMREAD_COLOR, IMREAD_GRAYSCALE};
-use opencv::imgproc::{warp_perspective, COLOR_BGR2BGRA, COLOR_BGR2GRAY};
+use opencv::imgproc::{COLOR_BGR2BGRA, COLOR_BGR2GRAY};
 use opencv::videoio::{VideoCaptureTrait, VideoCaptureTraitConst};
 use opencv::{core, highgui, img_hash, imgcodecs, imgproc, videoio};
 use opencv::{
@@ -441,6 +439,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Adds an overlay to the given frame with a hole in the center.
+///
+/// The overlay is created by adding an alpha channel to the frame and then drawing a semi-transparent rectangle in the center of the frame, leaving a hole in the middle.
+///
+/// # Arguments
+/// * `frame` - The input frame to add the overlay to.
+/// * `border_percentage` - The percentage of the frame height to use as the border size.
+/// * `ratio` - The aspect ratio of the hole in the center of the overlay.
+///
+/// # Returns
+/// A tuple containing the frame with the overlay, the cropped image inside the hole, and the rectangle of the hole.
 fn add_overlay(frame: &Mat, border_percentage: i32, ratio: f32) -> Result<(Mat, Mat, Rect)> {
     let size = frame.size()?;
     let mut frame4 = unsafe { Mat::new_size(size, CV_32FC4)? };
